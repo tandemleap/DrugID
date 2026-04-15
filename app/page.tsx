@@ -352,9 +352,19 @@ export default function Home() {
               )}
 
               <div className="space-y-3 border-t border-slate-100 pt-4">
-                {result.pill.strength && result.pill.strength !== "Unknown" && (
+                {/* Show expected strength from med list when matched — more reliable than AI visual estimate */}
+                {result.medMatch.matched && result.medMatch.matchedEntry?.strength &&
+                  !["otc", "qd", "bid"].includes(result.medMatch.matchedEntry.strength.toLowerCase()) ? (
+                  <div className="flex gap-3">
+                    <span className="text-slate-500 text-lg font-medium w-28 shrink-0">Strength:</span>
+                    <span className="text-slate-700 text-lg font-semibold">
+                      {result.medMatch.matchedEntry.strength}
+                      <span className="text-green-600 text-base font-normal ml-2">(from your list)</span>
+                    </span>
+                  </div>
+                ) : result.pill.strength && result.pill.strength !== "Unknown" ? (
                   <DetailRow label="Strength" value={result.pill.strength} />
-                )}
+                ) : null}
                 {result.pill.color && (
                   <DetailRow
                     label="Appearance"
