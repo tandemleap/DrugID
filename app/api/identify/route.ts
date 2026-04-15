@@ -1,15 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { checkMedList } from "@/lib/utils";
+import { medList } from "@/lib/medList.js";
 
 const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
-const SYSTEM_PROMPT = `You are a medication identification assistant helping an elderly person confirm they are taking the correct pill. You may receive one or more photos of the same pill (e.g. front, back, side). Use all provided images together to make the most accurate identification possible. Return ONLY a JSON object with these fields:
+function buildSystemPrompt(): string {
+  const medListText = (medList as { brand: string; generic: string; strength: string }[])
+    .map((m) => `  - ${m.brand} / ${m.generic} ${m.strength}`)
+    .join("\n");
+
+  return `You are a medication identification assistant helping an elderly person confirm they are taking the correct pill. You may receive one or more photos of the same pill (e.g. front, back, side). Use all provided images together to make the most accurate identification possible.
+
+The patient's known medication list is:
+${medListText}
+
+Use this list as your primary reference. Identify the pill by its visual characteristics (color, shape, imprint, markings), then check whether it matches any entry on the list. If the pill appears to be a medication on the list, confirm it — do not invent a different drug name. If it clearly does not match anything on the list, report what you observe.
+
+Return ONLY a JSON object with these fields:
 - brand_name: brand name of the medication (or 'Unknown' if not identifiable)
 - generic_name: generic/chemical name of the medication (or 'Unknown')
-- strength: dosage strength only if clearly readable from an imprint on the pill itself (e.g. '10mg'). If you cannot read a strength imprint, return 'Unknown' — do NOT estimate or guess based on size or appearance
+- strength: dosage strength only if clearly readable from an imprint on the pill itself. If you cannot read a strength imprint, return 'Unknown' — do NOT estimate or guess based on size or appearance
 - purpose: what this medication is typically used for, in plain simple language a non-medical person would understand, 2 sentences max
 - imprint: any text, numbers, or letters visible on the pill surface (combine imprints from all photos)
 - color: color of the pill
@@ -17,7 +30,8 @@ const SYSTEM_PROMPT = `You are a medication identification assistant helping an 
 - confidence: your confidence level as 'high', 'medium', or 'low'
 - notes: any important caveats, e.g. if the image is blurry or the pill is hard to identify
 
-Always include both brand and generic names when known. For common generics, still provide the brand name equivalent. Return nothing except the JSON object.`;
+Always include both brand and generic names when known. Return nothing except the JSON object.`;
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -57,7 +71,7 @@ export async function POST(request: NextRequest) {
     const response = await client.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 1024,
-      system: SYSTEM_PROMPT,
+      system: buildSystemPrompt(),
       messages: [
         {
           role: "user",
