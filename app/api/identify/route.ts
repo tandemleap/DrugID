@@ -6,12 +6,12 @@ const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
-const SYSTEM_PROMPT = `You are a medication identification assistant helping an elderly person confirm they are taking the correct pill. Analyze the pill in the photo carefully. Return ONLY a JSON object with these fields:
+const SYSTEM_PROMPT = `You are a medication identification assistant helping an elderly person confirm they are taking the correct pill. You may receive one or more photos of the same pill (e.g. front, back, side). Use all provided images together to make the most accurate identification possible. Return ONLY a JSON object with these fields:
 - brand_name: brand name of the medication (or 'Unknown' if not identifiable)
 - generic_name: generic/chemical name of the medication (or 'Unknown')
 - strength: dosage strength visible or likely (e.g. '10mg') (or 'Unknown')
 - purpose: what this medication is typically used for, in plain simple language a non-medical person would understand, 2 sentences max
-- imprint: any text, numbers, or letters visible on the pill surface
+- imprint: any text, numbers, or letters visible on the pill surface (combine imprints from all photos)
 - color: color of the pill
 - shape: shape of the pill
 - confidence: your confidence level as 'high', 'medium', or 'low'
@@ -22,22 +22,36 @@ Always include both brand and generic names when known. For common generics, sti
 export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData();
-    const imageFile = formData.get("image") as File | null;
+    const imageFiles = formData.getAll("images") as File[];
 
-    if (!imageFile) {
-      return NextResponse.json({ error: "No image provided" }, { status: 400 });
+    if (imageFiles.length === 0) {
+      return NextResponse.json({ error: "No images provided" }, { status: 400 });
     }
 
-    // Convert file to base64
-    const arrayBuffer = await imageFile.arrayBuffer();
-    const base64Data = Buffer.from(arrayBuffer).toString("base64");
+    // Convert all images to base64 content blocks
+    const imageBlocks = await Promise.all(
+      imageFiles.map(async (imageFile) => {
+        const arrayBuffer = await imageFile.arrayBuffer();
+        const base64Data = Buffer.from(arrayBuffer).toString("base64");
+        const mediaType = (imageFile.type || "image/jpeg") as
+          | "image/jpeg"
+          | "image/png"
+          | "image/gif"
+          | "image/webp";
+        return {
+          type: "image" as const,
+          source: {
+            type: "base64" as const,
+            media_type: mediaType,
+            data: base64Data,
+          },
+        };
+      })
+    );
 
-    // Determine media type
-    const mediaType = (imageFile.type || "image/jpeg") as
-      | "image/jpeg"
-      | "image/png"
-      | "image/gif"
-      | "image/webp";
+    const photoLabel = imageBlocks.length === 1
+      ? "Please identify this pill and return the JSON object as instructed."
+      : `I am providing ${imageBlocks.length} photos of the same pill (front, back, and/or side views). Use all photos together to identify it and return the JSON object as instructed.`;
 
     // Call Claude vision API
     const response = await client.messages.create({
@@ -48,17 +62,10 @@ export async function POST(request: NextRequest) {
         {
           role: "user",
           content: [
-            {
-              type: "image",
-              source: {
-                type: "base64",
-                media_type: mediaType,
-                data: base64Data,
-              },
-            },
+            ...imageBlocks,
             {
               type: "text",
-              text: "Please identify this pill and return the JSON object as instructed.",
+              text: photoLabel,
             },
           ],
         },

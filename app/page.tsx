@@ -2,6 +2,8 @@
 
 import { useState, useRef, useCallback } from "react";
 
+const MAX_PHOTOS = 3;
+
 interface PillData {
   brand_name: string;
   generic_name: string;
@@ -31,17 +33,20 @@ interface IdentifyResult {
 
 type AppState = "idle" | "loading" | "result" | "error";
 
+interface PhotoEntry {
+  previewUrl: string; // blob URL for display
+  file: File;         // compressed file for upload (set async)
+  ready: boolean;     // compression complete
+}
+
 export default function Home() {
   const [appState, setAppState] = useState<AppState>("idle");
-  const [preview, setPreview] = useState<string | null>(null);
+  const [photos, setPhotos] = useState<PhotoEntry[]>([]);
   const [result, setResult] = useState<IdentifyResult | null>(null);
   const [errorMsg, setErrorMsg] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const selectedFileRef = useRef<File | null>(null);
 
-  // Returns a compressed File for upload; uses a separate blob URL for preview
   const compressForUpload = useCallback(async (file: File): Promise<File> => {
-    // Convert HEIC/HEIF to JPEG first (Chrome/Firefox can't decode HEIC natively)
     const isHeic =
       file.type === "image/heic" ||
       file.type === "image/heif" ||
@@ -55,7 +60,7 @@ export default function Home() {
         const blob = Array.isArray(converted) ? converted[0] : converted;
         file = new File([blob], "pill.jpg", { type: "image/jpeg" });
       } catch {
-        // If heic2any fails, continue with original and let canvas try
+        // fall through to canvas
       }
     }
 
@@ -67,33 +72,20 @@ export default function Home() {
         const MAX = 1600;
         let { width, height } = img;
         if (width > MAX || height > MAX) {
-          if (width > height) {
-            height = Math.round((height * MAX) / width);
-            width = MAX;
-          } else {
-            width = Math.round((width * MAX) / height);
-            height = MAX;
-          }
+          if (width > height) { height = Math.round((height * MAX) / width); width = MAX; }
+          else { width = Math.round((width * MAX) / height); height = MAX; }
         }
         const canvas = document.createElement("canvas");
-        canvas.width = width;
-        canvas.height = height;
+        canvas.width = width; canvas.height = height;
         const ctx = canvas.getContext("2d");
         if (!ctx) return resolve(file);
         ctx.drawImage(img, 0, 0, width, height);
         canvas.toBlob(
-          (blob) => {
-            if (!blob) return resolve(file);
-            resolve(new File([blob], "pill.jpg", { type: "image/jpeg" }));
-          },
-          "image/jpeg",
-          0.85
+          (blob) => resolve(blob ? new File([blob], "pill.jpg", { type: "image/jpeg" }) : file),
+          "image/jpeg", 0.85
         );
       };
-      img.onerror = () => {
-        URL.revokeObjectURL(objectUrl);
-        resolve(file); // fall back to original on error
-      };
+      img.onerror = () => { URL.revokeObjectURL(objectUrl); resolve(file); };
       img.src = objectUrl;
     });
   }, []);
@@ -102,25 +94,37 @@ export default function Home() {
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
+      if (fileInputRef.current) fileInputRef.current.value = "";
 
+      const previewUrl = URL.createObjectURL(file);
+      const entry: PhotoEntry = { previewUrl, file, ready: false };
+
+      setPhotos((prev) => [...prev, entry]);
       setAppState("idle");
       setResult(null);
       setErrorMsg("");
 
-      // Show preview immediately using a blob URL of the original file
-      const previewUrl = URL.createObjectURL(file);
-      setPreview(previewUrl);
-
-      // Compress in the background for upload
       const compressed = await compressForUpload(file);
-      selectedFileRef.current = compressed;
+      setPhotos((prev) =>
+        prev.map((p) =>
+          p.previewUrl === previewUrl ? { ...p, file: compressed, ready: true } : p
+        )
+      );
     },
     [compressForUpload]
   );
 
+  const handleRemovePhoto = useCallback((previewUrl: string) => {
+    setPhotos((prev) => {
+      const entry = prev.find((p) => p.previewUrl === previewUrl);
+      if (entry) URL.revokeObjectURL(entry.previewUrl);
+      return prev.filter((p) => p.previewUrl !== previewUrl);
+    });
+  }, []);
+
   const handleIdentify = useCallback(async () => {
-    const file = selectedFileRef.current;
-    if (!file) return;
+    const readyPhotos = photos.filter((p) => p.ready);
+    if (readyPhotos.length === 0) return;
 
     setAppState("loading");
     setResult(null);
@@ -128,55 +132,37 @@ export default function Home() {
 
     try {
       const formData = new FormData();
-      formData.append("image", file);
+      readyPhotos.forEach((p) => formData.append("images", p.file));
 
-      const response = await fetch("/api/identify", {
-        method: "POST",
-        body: formData,
-      });
-
+      const response = await fetch("/api/identify", { method: "POST", body: formData });
       const data = await response.json();
 
-      if (!response.ok) {
-        throw new Error(data.error || "Something went wrong. Please try again.");
-      }
+      if (!response.ok) throw new Error(data.error || "Something went wrong. Please try again.");
 
       setResult(data);
       setAppState("result");
     } catch (err) {
-      const msg =
-        err instanceof Error
-          ? err.message
-          : "Something went wrong. Please try again.";
-      setErrorMsg(msg);
+      setErrorMsg(err instanceof Error ? err.message : "Something went wrong. Please try again.");
       setAppState("error");
     }
-  }, []);
+  }, [photos]);
 
   const handleReset = useCallback(() => {
-    setPreview((prev) => {
-      if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
-      return null;
+    setPhotos((prev) => {
+      prev.forEach((p) => URL.revokeObjectURL(p.previewUrl));
+      return [];
     });
     setAppState("idle");
     setResult(null);
     setErrorMsg("");
-    selectedFileRef.current = null;
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
-    }
   }, []);
 
-  const confidenceLabel = (confidence: string) => {
-    if (confidence === "high") return null;
-    if (confidence === "medium")
-      return "Moderate confidence — consider asking your pharmacist.";
-    return "Low confidence — please confirm with your pharmacist.";
-  };
+  const allReady = photos.length > 0 && photos.every((p) => p.ready);
 
   return (
     <main className="min-h-screen bg-blue-50 flex flex-col items-center px-4 py-8">
       <div className="w-full max-w-md">
+
         {/* Header */}
         <div className="text-center mb-8">
           <div className="text-5xl mb-3">💊</div>
@@ -191,19 +177,14 @@ export default function Home() {
         {/* Upload area */}
         {appState !== "result" && (
           <div className="bg-white rounded-2xl shadow-md p-6 mb-4">
-            <label
-              htmlFor="pill-photo"
-              className="flex flex-col items-center justify-center w-full min-h-40 border-2 border-dashed border-blue-300 rounded-xl cursor-pointer bg-blue-50 hover:bg-blue-100 transition-colors active:bg-blue-200"
-              style={{ WebkitTapHighlightColor: "transparent" }}
-            >
-              {preview ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={preview}
-                  alt="Pill preview"
-                  className="max-h-64 max-w-full rounded-lg object-contain"
-                />
-              ) : (
+
+            {/* First photo — big tap target */}
+            {photos.length === 0 && (
+              <label
+                htmlFor="pill-photo"
+                className="flex flex-col items-center justify-center w-full min-h-44 border-2 border-dashed border-blue-300 rounded-xl cursor-pointer bg-blue-50 hover:bg-blue-100 transition-colors active:bg-blue-200"
+                style={{ WebkitTapHighlightColor: "transparent" }}
+              >
                 <div className="flex flex-col items-center gap-3 py-6 px-4 text-center">
                   <span className="text-5xl">📷</span>
                   <span className="text-slate-700 font-semibold text-xl leading-snug">
@@ -213,8 +194,59 @@ export default function Home() {
                     Tap here to use your camera or choose a photo
                   </span>
                 </div>
-              )}
-            </label>
+              </label>
+            )}
+
+            {/* Photo thumbnails grid */}
+            {photos.length > 0 && (
+              <div className="space-y-4">
+                <div className={`grid gap-3 ${photos.length === 1 ? "grid-cols-1" : "grid-cols-2"}`}>
+                  {photos.map((p, i) => (
+                    <div key={p.previewUrl} className="relative">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={p.previewUrl}
+                        alt={`Pill photo ${i + 1}`}
+                        className="w-full rounded-xl object-cover aspect-square bg-slate-100"
+                      />
+                      {/* Loading shimmer while compressing */}
+                      {!p.ready && (
+                        <div className="absolute inset-0 rounded-xl bg-white/60 flex items-center justify-center">
+                          <div className="w-6 h-6 border-2 border-blue-200 border-t-blue-600 rounded-full animate-spin" />
+                        </div>
+                      )}
+                      {/* Remove button */}
+                      <button
+                        onClick={() => handleRemovePhoto(p.previewUrl)}
+                        className="absolute top-2 right-2 w-8 h-8 rounded-full bg-black/50 text-white flex items-center justify-center text-lg leading-none hover:bg-black/70"
+                        aria-label="Remove photo"
+                      >
+                        ×
+                      </button>
+                      <div className="absolute bottom-2 left-2 bg-black/40 text-white text-sm px-2 py-0.5 rounded-full">
+                        {i === 0 ? "Front" : i === 1 ? "Back" : "Side"}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Add another angle */}
+                {photos.length < MAX_PHOTOS && appState !== "loading" && (
+                  <label
+                    htmlFor="pill-photo"
+                    className="flex items-center justify-center gap-2 w-full py-3 border-2 border-dashed border-blue-300 rounded-xl cursor-pointer bg-blue-50 hover:bg-blue-100 transition-colors text-blue-600 font-semibold text-lg"
+                    style={{ WebkitTapHighlightColor: "transparent" }}
+                  >
+                    <span className="text-2xl">+</span>
+                    Add another angle
+                    <span className="text-slate-400 font-normal text-base">
+                      ({photos.length}/{MAX_PHOTOS})
+                    </span>
+                  </label>
+                )}
+              </div>
+            )}
+
             <input
               ref={fileInputRef}
               id="pill-photo"
@@ -225,10 +257,12 @@ export default function Home() {
               onChange={handleFileChange}
             />
 
-            {preview && appState !== "loading" && (
+            {/* Identify button */}
+            {photos.length > 0 && appState !== "loading" && (
               <button
                 onClick={handleIdentify}
-                className="mt-5 w-full bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white text-xl font-bold py-4 rounded-xl transition-colors shadow-sm"
+                disabled={!allReady}
+                className="mt-5 w-full bg-blue-600 hover:bg-blue-700 active:bg-blue-800 disabled:opacity-50 text-white text-xl font-bold py-4 rounded-xl transition-colors shadow-sm"
                 style={{ WebkitTapHighlightColor: "transparent" }}
               >
                 Identify This Pill
@@ -239,7 +273,7 @@ export default function Home() {
               <div className="mt-5 flex flex-col items-center gap-3 py-4">
                 <div className="w-10 h-10 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin" />
                 <p className="text-slate-600 text-lg font-medium">
-                  Analyzing pill&hellip;
+                  Analyzing {photos.length > 1 ? `${photos.length} photos` : "photo"}&hellip;
                 </p>
               </div>
             )}
@@ -258,9 +292,7 @@ export default function Home() {
                 Try taking it in better light, flat on a surface.
               </p>
               {errorMsg && (
-                <p className="text-slate-500 text-base mb-4 italic">
-                  {errorMsg}
-                </p>
+                <p className="text-slate-500 text-base mb-4 italic">{errorMsg}</p>
               )}
               <button
                 onClick={handleReset}
@@ -275,36 +307,33 @@ export default function Home() {
         {/* Results */}
         {appState === "result" && result && (
           <div className="space-y-4">
-            {/* Preview thumbnail */}
-            {preview && (
-              <div className="bg-white rounded-2xl shadow-md p-4 flex justify-center">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={preview}
-                  alt="Pill"
-                  className="max-h-36 rounded-lg object-contain"
-                />
+
+            {/* Photo thumbnails row */}
+            {photos.length > 0 && (
+              <div className={`grid gap-2 ${photos.length === 1 ? "grid-cols-1" : photos.length === 2 ? "grid-cols-2" : "grid-cols-3"}`}>
+                {photos.map((p, i) => (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    key={p.previewUrl}
+                    src={p.previewUrl}
+                    alt={`Pill photo ${i + 1}`}
+                    className="w-full rounded-xl object-cover aspect-square bg-slate-100"
+                  />
+                ))}
               </div>
             )}
 
             {/* Main result card */}
             <div className="bg-white rounded-2xl shadow-md p-6">
-              {/* Drug name */}
               <div className="mb-5">
                 <div className="text-3xl font-bold text-slate-800 leading-tight">
-                  {result.pill.brand_name !== "Unknown"
-                    ? result.pill.brand_name
-                    : result.pill.generic_name}
+                  {result.pill.brand_name !== "Unknown" ? result.pill.brand_name : result.pill.generic_name}
                 </div>
-                {result.pill.brand_name !== "Unknown" &&
-                  result.pill.generic_name !== "Unknown" && (
-                    <div className="text-slate-500 text-lg mt-1">
-                      {result.pill.generic_name}
-                    </div>
-                  )}
+                {result.pill.brand_name !== "Unknown" && result.pill.generic_name !== "Unknown" && (
+                  <div className="text-slate-500 text-lg mt-1">{result.pill.generic_name}</div>
+                )}
               </div>
 
-              {/* Details */}
               <div className="space-y-3 border-t border-slate-100 pt-4">
                 {result.pill.strength && result.pill.strength !== "Unknown" && (
                   <DetailRow label="Strength" value={result.pill.strength} />
@@ -320,49 +349,37 @@ export default function Home() {
                 )}
               </div>
 
-              {/* Purpose */}
               {result.pill.purpose && (
                 <div className="mt-4 bg-slate-50 rounded-xl p-4">
                   <div className="text-slate-500 text-base font-semibold uppercase tracking-wide mb-1">
                     What it&rsquo;s for
                   </div>
-                  <p className="text-slate-700 text-lg leading-snug">
-                    {result.pill.purpose}
-                  </p>
+                  <p className="text-slate-700 text-lg leading-snug">{result.pill.purpose}</p>
                 </div>
               )}
 
-              {/* Confidence warning */}
               {result.pill.confidence !== "high" && (
                 <div className="mt-4 bg-amber-50 border border-amber-200 rounded-xl p-4">
                   <p className="text-amber-800 text-base font-medium">
-                    ⚠️ {confidenceLabel(result.pill.confidence)}
+                    ⚠️ {result.pill.confidence === "medium"
+                      ? "Moderate confidence — consider asking your pharmacist."
+                      : "Low confidence — please confirm with your pharmacist."}
                   </p>
                   {result.pill.notes && (
-                    <p className="text-amber-700 text-base mt-1">
-                      {result.pill.notes}
-                    </p>
+                    <p className="text-amber-700 text-base mt-1">{result.pill.notes}</p>
                   )}
                 </div>
               )}
             </div>
 
             {/* Med list match */}
-            <div
-              className={`rounded-2xl shadow-md p-5 ${
-                result.medMatch.matched
-                  ? "bg-green-50 border border-green-200"
-                  : "bg-yellow-50 border border-yellow-200"
-              }`}
-            >
+            <div className={`rounded-2xl shadow-md p-5 ${result.medMatch.matched ? "bg-green-50 border border-green-200" : "bg-yellow-50 border border-yellow-200"}`}>
               {result.medMatch.matched ? (
                 <p className="text-green-800 text-xl font-semibold">
                   ✓ This appears to be on your medication list
                   {result.medMatch.matchedEntry && (
                     <span className="font-normal text-green-700">
-                      {" "}
-                      ({result.medMatch.matchedEntry.brand},{" "}
-                      {result.medMatch.matchedEntry.strength})
+                      {" "}({result.medMatch.matchedEntry.brand}, {result.medMatch.matchedEntry.strength})
                     </span>
                   )}
                 </p>
@@ -378,13 +395,10 @@ export default function Home() {
               )}
             </div>
 
-            {/* Disclaimer */}
             <p className="text-center text-slate-400 text-sm px-2 leading-snug">
-              This tool is for reference only. Always confirm medications with
-              your pharmacist or doctor.
+              This tool is for reference only. Always confirm medications with your pharmacist or doctor.
             </p>
 
-            {/* Check another button */}
             <button
               onClick={handleReset}
               className="w-full bg-slate-700 hover:bg-slate-800 active:bg-slate-900 text-white text-xl font-bold py-4 rounded-xl transition-colors shadow-sm"
@@ -402,9 +416,7 @@ export default function Home() {
 function DetailRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex gap-3">
-      <span className="text-slate-500 text-lg font-medium w-28 shrink-0">
-        {label}:
-      </span>
+      <span className="text-slate-500 text-lg font-medium w-28 shrink-0">{label}:</span>
       <span className="text-slate-700 text-lg">{value}</span>
     </div>
   );
