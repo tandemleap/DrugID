@@ -118,7 +118,7 @@ export async function POST(request: NextRequest) {
         }
       })(),
 
-      // NLM RxImage pill photo lookup
+      // DailyMed pill photo lookup (NLM official database)
       (async (): Promise<string | null> => {
         const searchName = pillData.generic_name?.toLowerCase() !== "unknown"
           ? pillData.generic_name
@@ -127,30 +127,47 @@ export async function POST(request: NextRequest) {
           : null;
         if (!searchName) return null;
 
-        const tryFetch = async (params: Record<string, string>): Promise<string | null> => {
-          try {
-            const qs = new URLSearchParams({ ...params, resolution: "600" }).toString();
-            const res = await fetch(`https://rximage.nlm.nih.gov/api/rximage/1/rxnav?${qs}`, {
-              signal: AbortSignal.timeout(5000),
-            });
-            if (!res.ok) return null;
-            const json = await res.json();
-            return json.nlmRxImages?.[0]?.imageUrl ?? null;
-          } catch {
-            return null;
-          }
-        };
+        try {
+          // Step 1: search DailyMed for matching SPL entries
+          const searchUrl = `https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json?drug_name=${encodeURIComponent(searchName)}&limit=8`;
+          const searchRes = await fetch(searchUrl, { signal: AbortSignal.timeout(5000) });
+          if (!searchRes.ok) return null;
+          const searchJson = await searchRes.json();
+          const setids: string[] = (searchJson.data ?? []).map((d: { setid: string }) => d.setid).slice(0, 5);
+          if (setids.length === 0) return null;
 
-        // Try name + imprint first (most specific), then name alone
-        const imprint = pillData.imprint && !["unknown", "none", ""].includes(pillData.imprint.toLowerCase())
-          ? pillData.imprint
-          : null;
+          // Step 2: fetch media lists for all setids in parallel
+          const mediaResults = await Promise.all(
+            setids.map(async (setid) => {
+              try {
+                const mediaRes = await fetch(
+                  `https://dailymed.nlm.nih.gov/dailymed/services/v2/spls/${setid}/media.json`,
+                  { signal: AbortSignal.timeout(5000) }
+                );
+                if (!mediaRes.ok) return null;
+                const mediaJson = await mediaRes.json();
+                const images: { url: string; name: string }[] = mediaJson.data?.media ?? [];
+                // Prefer images that look like pill photos — skip structure diagrams and figure charts
+                const pillImage = images.find((img) => {
+                  const n = img.name.toLowerCase();
+                  return img.url &&
+                    !n.includes("structure") &&
+                    !n.includes("figure") &&
+                    !n.includes("diagram") &&
+                    !n.includes("chemical") &&
+                    (n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".png"));
+                });
+                return pillImage?.url ?? null;
+              } catch {
+                return null;
+              }
+            })
+          );
 
-        if (imprint) {
-          const result = await tryFetch({ name: searchName, imprint });
-          if (result) return result;
+          return mediaResults.find((url) => url !== null) ?? null;
+        } catch {
+          return null;
         }
-        return tryFetch({ name: searchName });
       })(),
     ]);
 

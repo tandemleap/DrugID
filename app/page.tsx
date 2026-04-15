@@ -347,7 +347,7 @@ export default function Home() {
                     alt="Reference pill image from NLM database"
                     className="w-full max-h-48 object-contain rounded-xl bg-slate-50 border border-slate-100"
                   />
-                  <p className="text-slate-400 text-xs mt-1 text-center">Source: NLM RxImageAPI</p>
+                  <p className="text-slate-400 text-xs mt-1 text-center">Source: NLM DailyMed</p>
                 </div>
               )}
 
