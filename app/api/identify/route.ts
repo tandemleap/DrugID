@@ -95,38 +95,70 @@ export async function POST(request: NextRequest) {
       pillData.generic_name || "Unknown"
     );
 
-    // Background: enrich with openFDA (fail silently)
-    let fdaData: Record<string, string> | null = null;
-    if (
-      pillData.generic_name &&
-      pillData.generic_name.toLowerCase() !== "unknown"
-    ) {
-      try {
-        const fdaUrl = `https://api.fda.gov/drug/ndc.json?search=generic_name:%22${encodeURIComponent(pillData.generic_name)}%22&limit=1`;
-        const fdaResponse = await fetch(fdaUrl, {
-          signal: AbortSignal.timeout(5000),
-        });
-        if (fdaResponse.ok) {
+    // Run openFDA and RxImage lookups in parallel (both fail silently)
+    const [fdaData, pillImageUrl] = await Promise.all([
+      // openFDA enrichment
+      (async (): Promise<Record<string, string> | null> => {
+        if (!pillData.generic_name || pillData.generic_name.toLowerCase() === "unknown") return null;
+        try {
+          const fdaUrl = `https://api.fda.gov/drug/ndc.json?search=generic_name:%22${encodeURIComponent(pillData.generic_name)}%22&limit=1`;
+          const fdaResponse = await fetch(fdaUrl, { signal: AbortSignal.timeout(5000) });
+          if (!fdaResponse.ok) return null;
           const fdaJson = await fdaResponse.json();
-          if (fdaJson.results && fdaJson.results.length > 0) {
-            const result = fdaJson.results[0];
-            fdaData = {
-              brand_name: result.brand_name || "",
-              generic_name: result.generic_name || "",
-              dosage_form: result.dosage_form || "",
-              strength: result.active_ingredients?.[0]?.strength || "",
-            };
-          }
+          if (!fdaJson.results?.length) return null;
+          const result = fdaJson.results[0];
+          return {
+            brand_name: result.brand_name || "",
+            generic_name: result.generic_name || "",
+            dosage_form: result.dosage_form || "",
+            strength: result.active_ingredients?.[0]?.strength || "",
+          };
+        } catch {
+          return null;
         }
-      } catch {
-        // Fail silently — FDA enrichment is best-effort
-      }
-    }
+      })(),
+
+      // NLM RxImage pill photo lookup
+      (async (): Promise<string | null> => {
+        const searchName = pillData.generic_name?.toLowerCase() !== "unknown"
+          ? pillData.generic_name
+          : pillData.brand_name?.toLowerCase() !== "unknown"
+          ? pillData.brand_name
+          : null;
+        if (!searchName) return null;
+
+        const tryFetch = async (params: Record<string, string>): Promise<string | null> => {
+          try {
+            const qs = new URLSearchParams({ ...params, resolution: "600" }).toString();
+            const res = await fetch(`https://rximage.nlm.nih.gov/api/rximage/1/rxnav?${qs}`, {
+              signal: AbortSignal.timeout(5000),
+            });
+            if (!res.ok) return null;
+            const json = await res.json();
+            return json.nlmRxImages?.[0]?.imageUrl ?? null;
+          } catch {
+            return null;
+          }
+        };
+
+        // Try name + imprint first (most specific), then name alone
+        const imprint = pillData.imprint && !["unknown", "none", ""].includes(pillData.imprint.toLowerCase())
+          ? pillData.imprint
+          : null;
+
+        if (imprint) {
+          const result = await tryFetch({ name: searchName, imprint });
+          if (result) return result;
+        }
+        return tryFetch({ name: searchName });
+      })(),
+    ]);
 
     return NextResponse.json({
       pill: pillData,
       medMatch,
       fdaData,
+      pillImageUrl,
     });
   } catch (error) {
     console.error("Identify API error:", error);

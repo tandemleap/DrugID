@@ -29,6 +29,7 @@ interface IdentifyResult {
   pill: PillData;
   medMatch: MedMatchResult;
   fdaData?: Record<string, string> | null;
+  pillImageUrl?: string | null;
 }
 
 type AppState = "idle" | "loading" | "result" | "error";
@@ -333,6 +334,22 @@ export default function Home() {
                   <div className="text-slate-500 text-lg mt-1">{result.pill.generic_name}</div>
                 )}
               </div>
+
+              {/* Database reference image */}
+              {result.pillImageUrl && (
+                <div className="mb-5">
+                  <div className="text-slate-500 text-sm font-semibold uppercase tracking-wide mb-2">
+                    Database match
+                  </div>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={result.pillImageUrl}
+                    alt="Reference pill image from NLM database"
+                    className="w-full max-h-48 object-contain rounded-xl bg-slate-50 border border-slate-100"
+                  />
+                  <p className="text-slate-400 text-xs mt-1 text-center">Source: NLM RxImageAPI</p>
+                </div>
+              )}
 
               <div className="space-y-3 border-t border-slate-100 pt-4">
                 {result.pill.strength && result.pill.strength !== "Unknown" && (
